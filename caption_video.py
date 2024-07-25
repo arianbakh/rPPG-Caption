@@ -74,6 +74,8 @@ def run(args):  # TODO break into functions
     # get clips
     abs_fd_dir = os.path.abspath(args.fd_dir)
     abs_video_path = os.path.abspath(args.video_path)
+    video_fps, video_width, video_height = get_video_info(abs_video_path)
+    unit_size = video_width // 16
     abs_output_dir = os.path.abspath(args.output_dir)
     face_video_command = 'python %s/face_video.py --video-path %s --output-dir %s --num-processes %d' % (
         abs_fd_dir,
@@ -117,10 +119,10 @@ def run(args):  # TODO break into functions
         with open(pulse_path, 'rb') as pulse_file:
             pulse_time_series = np.load(pulse_file)
         pulse_video_path = os.path.join(pulse_video_dir, clip_file_name.split('.')[0] + '_pulse.mp4')
-        create_pulse_video(pulse_time_series, clip_height, clip_fps, pulse_video_path)
+        create_pulse_video(pulse_time_series, unit_size, clip_fps, pulse_video_path)
 
         # mix clip and pulse video
-        clip = VideoFileClip(clip_path)
+        clip = VideoFileClip(clip_path).resize(height=unit_size)
         pulse_video = VideoFileClip(pulse_video_path)
         final_clip = clips_array([[clip, pulse_video]])
         mix_path = os.path.join(mix_dir, clip_file_name.split('.')[0] + '_mix.mp4')
