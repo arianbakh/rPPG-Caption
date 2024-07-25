@@ -1,11 +1,13 @@
 import argparse
+import bisect
 import cv2
+import math
 import numpy as np
 import os
 import subprocess
 import zipfile
 
-from moviepy.editor import VideoFileClip, clips_array, vfx
+from moviepy.editor import VideoFileClip, clips_array, CompositeVideoClip
 
 
 def run_command(command, conda_dir, env_name):
@@ -19,7 +21,8 @@ def get_video_info(video_path):
     fps = int(video.get(cv2.CAP_PROP_FPS))
     width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    return fps, width, height
+    frame_count = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
+    return fps, width, height, frame_count
 
 
 def create_pulse_video(
@@ -68,14 +71,62 @@ def create_pulse_video(
     video.release()
 
 
+def get_bounds(mix_dir, mix_video_name):
+    _, _, _, frame_count = get_video_info(os.path.join(mix_dir, mix_video_name))
+    start_frame = int(mix_video_name.split('_')[0].split('-')[1][1:])
+    return start_frame, frame_count
+
+
+def get_clip_data_structures(mix_dir):
+    mix_video_names = list(os.listdir(mix_dir))
+    mix_locations = {}
+    events = []
+    for mix_video_name in mix_video_names:
+        start_frame, frame_count = get_bounds(mix_dir, mix_video_name)
+        events.append({
+            'time': start_frame,
+            'mix_video_name': mix_video_name,
+            'type': 'begin',
+        })
+        events.append({
+            'time': start_frame + frame_count - 1,
+            'mix_video_name': mix_video_name,
+            'type': 'end',
+        })
+        mix_locations[mix_video_name] = -1  # TODO error handling: check none are -1 in the end
+    available_locations = list(range(len(mix_video_names)))
+    sorted_events = sorted(events, key=lambda x: (x['time'], 0 if x['type'] == 'end' else 1))
+    for event in sorted_events:
+        if event['type'] == 'end':
+            mix_location = mix_locations[event['mix_video_name']]
+            assert mix_location >= 0  # a clip should begin before it ends
+            bisect.insort_left(available_locations, mix_location)
+        elif event['type'] == 'begin':
+            mix_location = available_locations[0]
+            available_locations.remove(mix_location)
+            mix_locations[event['mix_video_name']] = mix_location
+    max_concurrent_clips = max(mix_locations.values())
+    return max_concurrent_clips, mix_locations
+
+
 def run(args):  # TODO break into functions
     video_file_name = os.path.basename(args.video_path).split('.')[0]
+    abs_video_path = os.path.abspath(args.video_path)
+    video_fps, video_width, video_height, _ = get_video_info(abs_video_path)
+
+    # calculate clip size and location
+    if video_width >= 1024:
+        unit_size = video_width // 16
+        columns = 4
+    elif 512 <= video_width < 1024:
+        unit_size = video_width // 8
+        columns = 2
+    else:
+        unit_size = video_width // 4
+        columns = 1
 
     # get clips
     abs_fd_dir = os.path.abspath(args.fd_dir)
-    abs_video_path = os.path.abspath(args.video_path)
-    video_fps, video_width, video_height = get_video_info(abs_video_path)
-    unit_size = video_width // 16
     abs_output_dir = os.path.abspath(args.output_dir)
     face_video_command = 'python %s/face_video.py --video-path %s --output-dir %s --num-processes %d' % (
         abs_fd_dir,
@@ -84,7 +135,7 @@ def run(args):  # TODO break into functions
         args.num_processes
     )
     abs_conda_dir = os.path.abspath(args.conda_dir)
-    #run_command(face_video_command, abs_conda_dir 'fd')  # TODO uncomment
+    run_command(face_video_command, abs_conda_dir, 'fd')
     zip_file_path = os.path.join(abs_output_dir, '%s_clips.zip' % video_file_name)
     clips_dir = os.path.join(abs_output_dir, '%s_clips' % video_file_name)
     with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
@@ -103,7 +154,7 @@ def run(args):  # TODO break into functions
         os.makedirs(mix_dir)
     for clip_file_name in os.listdir(clips_dir):
         clip_path = os.path.join(clips_dir, clip_file_name)
-        clip_fps, clip_width, clip_height = get_video_info(clip_path)
+        clip_fps, _, _, _ = get_video_info(clip_path)
 
         # get rPPG for clip
         pulse_path = os.path.join(pulse_dir, clip_file_name.split('.')[0] + '.npy')
@@ -113,7 +164,7 @@ def run(args):  # TODO break into functions
             pulse_path,
             os.path.join(abs_mtts_can_dir, 'mtts_can.hdf5')
         )
-        #run_command(rppg_command, abs_conda_dir, 'tf-gpu')  # TODO uncomment
+        run_command(rppg_command, abs_conda_dir, 'tf-gpu')
 
         # create pulse video for clip
         with open(pulse_path, 'rb') as pulse_file:
@@ -124,13 +175,33 @@ def run(args):  # TODO break into functions
         # mix clip and pulse video
         clip = VideoFileClip(clip_path).resize(height=unit_size)
         pulse_video = VideoFileClip(pulse_video_path)
-        final_clip = clips_array([[clip, pulse_video]])
+        mix_clip = clips_array([[clip, pulse_video]])
         mix_path = os.path.join(mix_dir, clip_file_name.split('.')[0] + '_mix.mp4')
-        final_clip.write_videofile(mix_path)
-        # TODO resize merged clip to a standard size (before creating pulse vid)
-        # TODO merge main video and clips
-        # TODO -- requires knowing maximum number of clips per frame
-        # TODO -- requires knowing which frames each clip belongs to, add it to the metadata somehow
+        mix_clip.write_videofile(mix_path)
+
+    # create final video
+    max_concurrent_clips, mix_locations = get_clip_data_structures(mix_dir)
+    original_video = VideoFileClip(abs_video_path)
+    videos_to_compose = []
+    padded_video = original_video.margin(bottom=unit_size * int(math.ceil(max_concurrent_clips / columns)))
+    videos_to_compose.append(padded_video)
+    for mix_video_name, mix_location in mix_locations.items():
+        mix_row = mix_location // columns
+        mix_col = mix_location % columns
+        start_frame, _ = get_bounds(mix_dir, mix_video_name)
+        augmented_mix_clip = VideoFileClip(
+            os.path.join(mix_dir, mix_video_name)
+        ).set_start(
+            start_frame / video_fps
+        ).set_position(
+            (
+                mix_col * 4 * unit_size,  # 1 + width_coeff = 4
+                video_height + mix_row * unit_size
+            )
+        )
+        videos_to_compose.append(augmented_mix_clip)
+    final_video = CompositeVideoClip(videos_to_compose)
+    final_video.write_videofile(os.path.join(abs_output_dir, '%s_final.mp4' % video_file_name))
 
 
 if __name__ == '__main__':
