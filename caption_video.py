@@ -5,6 +5,8 @@ import os
 import subprocess
 import zipfile
 
+from moviepy.editor import VideoFileClip, clips_array, vfx
+
 
 def run_command(command, conda_dir, env_name):
     activation_command = f'source {conda_dir}/etc/profile.d/conda.sh && conda activate {env_name} && {command}'    
@@ -20,7 +22,16 @@ def get_video_info(video_path):
     return fps, width, height
 
 
-def create_pulse_video(pulse_time_series, clip_height, fps, pulse_video_path, limit_seconds=3, padding_pixels=5, width_coeff=3):
+def create_pulse_video(
+    pulse_time_series,
+    clip_height,
+    fps,
+    pulse_video_path,
+    limit_seconds=6,
+    padding_pixels=5,
+    width_coeff=3,
+    color=(77, 71, 255)
+):
     limit_data_points = limit_seconds * fps
     normalized_time_series = (
         pulse_time_series - np.min(pulse_time_series)
@@ -40,12 +51,18 @@ def create_pulse_video(pulse_time_series, clip_height, fps, pulse_video_path, li
         ydata = normalized_time_series[start:i + 1]
         xdata = np.arange(0, len(ydata))
         frame = np.zeros((clip_height, clip_width, 3), dtype=np.uint8)
+        last_x = None
+        last_y = None
         for j in range(len(xdata) - 1):
             x1 = int(xdata[j] / limit_data_points * clip_width)
             y1 = clip_height - int(ydata[j])
             x2 = int(xdata[j + 1] / limit_data_points * clip_width)
             y2 = clip_height - int(ydata[j + 1])
-            cv2.line(frame, (x1, y1), (x2, y2), (255, 255, 255), 1)
+            last_x = x2
+            last_y = y2
+            cv2.line(frame, (x1, y1), (x2, y2), color, 2)
+        if last_x is not None and last_y is not None:
+            cv2.circle(frame, (x2, y2), 5, color, -1)
         video.write(frame)
     cv2.destroyAllWindows()
     video.release()
@@ -79,6 +96,9 @@ def run(args):  # TODO break into functions
     pulse_video_dir = os.path.join(abs_output_dir, '%s_pulse_videos' % video_file_name)
     if not os.path.exists(pulse_video_dir):
         os.makedirs(pulse_video_dir)
+    mix_dir = os.path.join(abs_output_dir, '%s_mix' % video_file_name)
+    if not os.path.exists(mix_dir):
+        os.makedirs(mix_dir)
     for clip_file_name in os.listdir(clips_dir):
         clip_path = os.path.join(clips_dir, clip_file_name)
         clip_fps, clip_width, clip_height = get_video_info(clip_path)
@@ -98,8 +118,14 @@ def run(args):  # TODO break into functions
             pulse_time_series = np.load(pulse_file)
         pulse_video_path = os.path.join(pulse_video_dir, clip_file_name.split('.')[0] + '_pulse.mp4')
         create_pulse_video(pulse_time_series, clip_height, clip_fps, pulse_video_path)
-        # TODO merge clip and pulse video
-        # TODO resize merged clip to a standard size
+
+        # mix clip and pulse video
+        clip = VideoFileClip(clip_path)
+        pulse_video = VideoFileClip(pulse_video_path)
+        final_clip = clips_array([[clip, pulse_video]])
+        mix_path = os.path.join(mix_dir, clip_file_name.split('.')[0] + '_mix.mp4')
+        final_clip.write_videofile(mix_path)
+        # TODO resize merged clip to a standard size (before creating pulse vid)
         # TODO merge main video and clips
         # TODO -- requires knowing maximum number of clips per frame
         # TODO -- requires knowing which frames each clip belongs to, add it to the metadata somehow
