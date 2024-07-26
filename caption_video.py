@@ -4,6 +4,7 @@ import cv2
 import math
 import numpy as np
 import os
+import shutil
 import subprocess
 import zipfile
 
@@ -138,6 +139,9 @@ def run(args):  # TODO break into functions
     run_command(face_video_command, abs_conda_dir, 'fd')
     zip_file_path = os.path.join(abs_output_dir, '%s_clips.zip' % video_file_name)
     clips_dir = os.path.join(abs_output_dir, '%s_clips' % video_file_name)
+    if os.path.exists(clips_dir):
+        shutil.rmtree(clips_dir)
+    os.makedirs(clips_dir)
     with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
         zip_ref.extractall(clips_dir)
 
